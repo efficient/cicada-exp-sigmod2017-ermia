@@ -35,6 +35,8 @@ uint64_t local_key_counter[sysconf::MAX_THREADS];
 
 uint g_reps_per_tx = 1;
 uint g_rmw_additional_reads = 0;
+double g_rmw_read_ratio = 0.;
+double g_zipf_theta = 0.;
 char g_workload = 'F';
 uint g_initial_table_size = 10000;
 int g_sort_load_keys = 0;
@@ -55,8 +57,10 @@ YcsbWorkload YcsbWorkloadH('H', 0,  0,    0,    100U, 0);     // Workload H - 10
 
 YcsbWorkload workload = YcsbWorkloadF;
 
-fast_random rnd_record_select(477377);
+// This looks like sharing the same random state, which is bad
+//fast_random rnd_record_select(477377);
 
+/*
 YcsbKey key_arena;
 YcsbKey&
 build_rmw_key(int worker_id) {
@@ -70,6 +74,7 @@ build_rmw_key(int worker_id) {
   key_arena.build(hi, lo);
   return key_arena;
 }
+*/
 
 class ycsb_worker : public bench_worker {
 public:
@@ -79,7 +84,9 @@ public:
               spin_barrier *barrier_a, spin_barrier *barrier_b)
     : bench_worker(worker_id, seed, db,
                    open_tables, barrier_a, barrier_b),
-      tbl(open_tables.at("USERTABLE"))
+      tbl(open_tables.at("USERTABLE")),
+      rnd_record_select(477377 + seed),
+      rnd_op_select(477377 + 10101 + seed)
   {
   }
 
@@ -130,22 +137,54 @@ public:
     return static_cast<ycsb_worker *>(w)->txn_rmw();
   }
 
+  void
+  build_rmw_key(int worker_id, YcsbKey& key) {
+    uint64_t key_seq = zipf(g_initial_table_size, g_zipf_theta);
+    auto cnt = local_key_counter[worker_id];
+    if (cnt == 0) {
+      cnt = local_key_counter[0];
+    }
+    auto hi = key_seq / cnt;
+    auto lo = key_seq % cnt;
+    key.build(hi, lo);
+  }
+
   rc_t txn_rmw() {
+    assert(g_reps_per_tx + g_rmw_read_ratio <= max_keys);
+
+    const uint32_t threshold = (uint32_t)(g_rmw_read_ratio * (double)(1 << 20));
+
+    for (uint i = 0; i < g_reps_per_tx + g_rmw_additional_reads; ++i) {
+      bool duplicate = true;
+      while (duplicate) {
+        duplicate = false;
+        build_rmw_key(worker_id, keys[i]);
+        for (uint j = 0; j < i; j++)
+          if (keys[j] == keys[i]) {
+            duplicate = true;
+            break;
+        }
+      }
+    }
+
     void *txn = db->new_txn(0, arena, txn_buf(), abstract_db::HINT_DEFAULT);
     arena.reset();
     for (uint i = 0; i < g_reps_per_tx; ++i) {
-      auto& key = build_rmw_key(worker_id);
+      bool read = (rnd_op_select.next_u32() % (1 << 20)) < threshold;
+      auto& key = keys[i];
       varstr k((char *)&key.data_, sizeof(key));
       varstr v = str(sizeof(YcsbRecord));
       // TODO(tzwang): add read/write_all_fields knobs
       try_catch(tbl->get(txn, k, v));  // Read
-      memset(v.data(), 'a', v.size());
-      ASSERT(v.size() == sizeof(YcsbRecord));
-      try_catch(tbl->put(txn, k, v));  // Modify-write
+      if (!read) {
+        memset(v.data(), 'a', v.size());
+        ASSERT(v.size() == sizeof(YcsbRecord));
+        try_catch(tbl->put(txn, k, v));  // Modify-write
+      }
     }
 
     for (uint i = 0; i < g_rmw_additional_reads; ++i) {
-      auto& key = build_rmw_key(worker_id);
+      auto& key = keys[g_reps_per_tx + i];
       varstr k((char *)&key.data_, sizeof(key));
       varstr v = str(sizeof(YcsbRecord));
       // TODO(tzwang): add read/write_all_fields knobs
@@ -153,6 +192,14 @@ public:
     }
     try_catch(db->commit_txn(txn));
     return {RC_TRUE};
+  }
+
+  static void calculateDenom() {
+    // printf("n=%u, theta=%lf\n", g_initial_table_size, g_zipf_theta);
+    assert(the_n == 0);
+    the_n = g_initial_table_size;
+    denom = zeta(the_n, g_zipf_theta);
+    zeta_2_theta = zeta(2, g_zipf_theta);
   }
 
 protected:
@@ -164,7 +211,42 @@ protected:
 
 private:
   abstract_ordered_index *tbl;
+  fast_random rnd_record_select;
+  fast_random rnd_op_select;
+
+  static const size_t max_keys = 16;
+  YcsbKey keys[max_keys];
+
+  static double zeta(uint64_t n, double theta) {
+    double sum = 0;
+    for (uint64_t i = 1; i <= n; i++) sum += pow(1.0 / i, theta);
+    return sum;
+  }
+  uint64_t zipf(uint64_t n, double theta) {
+    assert(this->the_n == n);
+    assert(theta == g_zipf_theta);
+    double alpha = 1 / (1 - theta);
+    double zetan = denom;
+    double eta = (1 - pow(2.0 / n, 1 - theta)) / (1 - zeta_2_theta / zetan);
+    double u;
+    u = rnd_record_select.next_uniform();
+    double uz = u * zetan;
+    // if (uz < 1) return 1;
+    // if (uz < 1 + pow(0.5, theta)) return 2;
+    // return 1 + (uint64_t)(n * pow(eta*u -eta + 1, alpha));
+    if (uz < 1) return 0;
+    if (uz < 1 + pow(0.5, theta)) return 1;
+    uint64_t v = 0 + (uint64_t)(n * pow(eta * u - eta + 1, alpha));
+    if (v >= n) v = n - 1;
+    return v;
+  }
+  static uint64_t the_n;
+  static double denom;
+  static double zeta_2_theta;
 };
+uint64_t ycsb_worker::the_n;
+double ycsb_worker::denom;
+double ycsb_worker::zeta_2_theta;
 
 class ycsb_usertable_loader : public bench_loader {
 public:
@@ -257,6 +339,7 @@ protected:
   virtual vector<bench_worker *>
   make_workers()
   {
+    ycsb_worker::calculateDenom();
     fast_random r(8544290);
     vector<bench_worker *> ret;
     for (size_t i = 0; i < sysconf::worker_threads; i++)
@@ -278,6 +361,8 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
     {
       {"reps-per-tx"            , required_argument, 0                , 'r' },
       {"rmw-additional-reads"   , required_argument, 0                , 'a' },
+      {"rmw-read-ratio"         , required_argument, 0                , 't' },
+      {"zipf-theta"             , required_argument, 0                , 'z' },
       {"workload"               , required_argument, 0                , 'w' },
       {"initial-table-size"     , required_argument, 0                , 's' },
       {"sort-load-keys"         , no_argument      , &g_sort_load_keys, 1   },
@@ -285,7 +370,7 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
     };
 
     int option_index = 0;
-    int c = getopt_long(argc, argv, "r:a:w:s:", long_options, &option_index);
+    int c = getopt_long(argc, argv, "r:a:t:z:w:s:", long_options, &option_index);
     if (c == -1)
       break;
     switch (c) {
@@ -301,6 +386,14 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
 
     case 'a':
       g_rmw_additional_reads = strtoul(optarg, NULL, 10);
+      break;
+
+    case 't':
+      g_rmw_read_ratio = strtod(optarg, NULL);
+      break;
+
+    case 'z':
+      g_zipf_theta = strtod(optarg, NULL);
       break;
 
     case 's':
@@ -348,6 +441,8 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
          << "  initial user table size:    " << g_initial_table_size << endl
          << "  operations per transaction: " << g_reps_per_tx << endl
          << "  additional reads after RMW: " << g_rmw_additional_reads << endl
+         << "  read ratio in RMW:          " << g_rmw_read_ratio << endl
+         << "  zipf theta:                 " << g_zipf_theta << endl
          << "  sort load keys:             " << g_sort_load_keys << endl;
   }
 
