@@ -31,7 +31,7 @@ ifeq ($(DEBUG_S),1)
 else
 	MASSTREE_CONFIG+=--disable-assertions
 endif
-ifeq ($(NDEBUG_S),1)
+ifeq ($(NDEBUG_S),0)
 	OSUFFIX_S=.check
 	MASSTREE_CONFIG+=--enable-invariants --enable-preconditions
 else
