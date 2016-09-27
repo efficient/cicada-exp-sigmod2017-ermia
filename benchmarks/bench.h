@@ -43,6 +43,7 @@ extern int verbose;
 extern uint64_t txn_flags;
 extern double scale_factor;
 extern uint64_t runtime;
+extern uint64_t max_runtime;
 extern uint64_t ops_per_worker;
 extern int run_mode;
 extern int enable_parallel_loading;
@@ -134,6 +135,8 @@ public:
     try_impersonate();
   }
 
+  virtual ~bench_worker() {}
+
   typedef rc_t (*txn_fn_t)(bench_worker *);
 
   struct workload_desc {
@@ -193,6 +196,8 @@ private:
   virtual void my_work(char *);
 
 protected:
+
+  virtual void on_run_setup() {}
 
   inline void *txn_buf() { return (void *) txn_obj_buf.data(); }
 

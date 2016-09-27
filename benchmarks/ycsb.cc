@@ -88,7 +88,10 @@ public:
       rnd_record_select(477377 + seed),
       rnd_op_select(477377 + 10101 + seed)
   {
+    all_keys = new YcsbKey[ops_per_worker * (g_reps_per_tx + g_rmw_additional_reads)];
   }
+
+  virtual ~ycsb_worker() { delete [] all_keys; }
 
   virtual workload_desc_vec
   get_workload() const
@@ -137,41 +140,16 @@ public:
     return static_cast<ycsb_worker *>(w)->txn_rmw();
   }
 
-  void
-  build_rmw_key(int worker_id, YcsbKey& key) {
-    uint64_t key_seq = zipf(g_initial_table_size, g_zipf_theta);
-    auto cnt = local_key_counter[worker_id];
-    if (cnt == 0) {
-      cnt = local_key_counter[0];
-    }
-    auto hi = key_seq / cnt;
-    auto lo = key_seq % cnt;
-    key.build(hi, lo);
-  }
-
   rc_t txn_rmw() {
     assert(g_reps_per_tx + g_rmw_read_ratio <= max_keys);
 
-    const uint32_t threshold = (uint32_t)(g_rmw_read_ratio * (double)(1 << 20));
-
-    for (uint i = 0; i < g_reps_per_tx + g_rmw_additional_reads; ++i) {
-      bool duplicate = true;
-      while (duplicate) {
-        duplicate = false;
-        build_rmw_key(worker_id, keys[i]);
-        for (uint j = 0; j < i; j++)
-          if (keys[j] == keys[i]) {
-            duplicate = true;
-            break;
-        }
-      }
-    }
-
     void *txn = db->new_txn(0, arena, txn_buf(), abstract_db::HINT_DEFAULT);
     arena.reset();
+    const uint32_t threshold = (uint32_t)(g_rmw_read_ratio * (double)(1 << 20));
+    size_t off = get_ntxn_commits() * (g_reps_per_tx + g_rmw_additional_reads);
     for (uint i = 0; i < g_reps_per_tx; ++i) {
       bool read = (rnd_op_select.next_u32() % (1 << 20)) < threshold;
-      auto& key = keys[i];
+      auto& key = all_keys[off + i];
       varstr k((char *)&key.data_, sizeof(key));
       varstr v = str(sizeof(YcsbRecord));
       // TODO(tzwang): add read/write_all_fields knobs
@@ -184,7 +162,7 @@ public:
     }
 
     for (uint i = 0; i < g_rmw_additional_reads; ++i) {
-      auto& key = keys[g_reps_per_tx + i];
+      auto& key = all_keys[off + g_reps_per_tx + i];
       varstr k((char *)&key.data_, sizeof(key));
       varstr v = str(sizeof(YcsbRecord));
       // TODO(tzwang): add read/write_all_fields knobs
@@ -203,6 +181,36 @@ public:
   }
 
 protected:
+  virtual void
+  on_run_setup() override
+  {
+    for (uint t = 0; t < ops_per_worker; ++t) {
+      size_t off = t * (g_reps_per_tx + g_rmw_additional_reads);
+
+      for (uint i = 0; i < g_reps_per_tx + g_rmw_additional_reads; ++i) {
+        bool duplicate = true;
+        while (duplicate) {
+          duplicate = false;
+          uint64_t key_seq = zipf(g_initial_table_size, g_zipf_theta);
+          auto& key = all_keys[off + i];
+          auto cnt = local_key_counter[worker_id];
+          if (cnt == 0) {
+            cnt = local_key_counter[0];
+          }
+          auto hi = key_seq / cnt;
+          auto lo = key_seq % cnt;
+          key.build(hi, lo);
+
+          for (uint j = 0; j < i; j++)
+            if (all_keys[off + j] == all_keys[off + i]) {
+              duplicate = true;
+              break;
+          }
+        }
+      }
+    }
+    cerr << "[INFO] finished generating keys [worker_id=" << worker_id << "]" << endl;
+  }
 
   inline ALWAYS_INLINE varstr&
   str(uint64_t size) {
@@ -215,7 +223,7 @@ private:
   fast_random rnd_op_select;
 
   static const size_t max_keys = 16;
-  YcsbKey keys[max_keys];
+  YcsbKey* all_keys;
 
   static double zeta(uint64_t n, double theta) {
     double sum = 0;
@@ -434,6 +442,10 @@ ycsb_do_test(abstract_db *db, int argc, char **argv)
   }
 
   ALWAYS_ASSERT(g_initial_table_size);
+
+  // Both must be non-zero because we use a trace.
+  ALWAYS_ASSERT(ops_per_worker);
+  ALWAYS_ASSERT(max_runtime);
 
   if (verbose) {
     cerr << "ycsb settings:" << endl

@@ -63,6 +63,7 @@ main(int argc, char **argv)
       {"num-threads"                , required_argument , 0                          , 't'} ,
       {"txn-flags"                  , required_argument , 0                          , 'f'} ,
       {"runtime"                    , required_argument , 0                          , 'r'} ,
+      {"max-runtime"                , required_argument , 0                          , 'R'} ,
       {"ops-per-worker"             , required_argument , 0                          , 'n'} ,
       {"bench-opts"                 , required_argument , 0                          , 'o'} ,
       {"log-dir"                    , required_argument , 0                          , 'l'} ,
@@ -142,6 +143,10 @@ main(int argc, char **argv)
       runtime = strtoul(optarg, NULL, 10);
       ALWAYS_ASSERT(runtime > 0);
       run_mode = RUNMODE_TIME;
+      break;
+
+    case 'R':
+      max_runtime = strtoul(optarg, NULL, 10);
       break;
 
     case 'w':
@@ -259,6 +264,7 @@ main(int argc, char **argv)
       cerr << "  runtime     : " << runtime                 << endl;
     else
       cerr << "  ops/worker  : " << ops_per_worker          << endl;
+    cerr << "  max-runtime : " << max_runtime               << endl;
 #ifdef USE_VARINT_ENCODING
     cerr << "  var-encode  : yes"                           << endl;
 #else
