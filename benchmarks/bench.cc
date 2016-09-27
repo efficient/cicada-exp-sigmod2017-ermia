@@ -70,6 +70,7 @@ map_agg(map<K, V> &agg, const map<K, V> &m)
 void
 bench_worker::my_work(char *)
 {
+    on_run_setup();
 	const workload_desc_vec workload = get_workload();
 	txn_counts.resize(workload.size());
 	barrier_a->count_down();
