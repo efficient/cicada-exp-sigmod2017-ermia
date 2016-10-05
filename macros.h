@@ -19,7 +19,7 @@
 #error "can't use SSI and SSN together."
 #endif
 
-//#define PHANTOM_PROT
+#define PHANTOM_PROT
 
 //#define USE_DYNARRAY_STR_ARENA
 
