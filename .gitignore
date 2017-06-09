@@ -30,3 +30,16 @@
 *.vrb
 *.xdy
 *.tdo
+
+dbcore/burt-hash.cpp
+dbtest-SI
+dbtest-SI_SSN
+dbtest-SSI
+masstree/GNUmakefile
+masstree/_masstree_config.d
+masstree/autom4te.cache/
+masstree/config.h
+masstree/config.h.in
+masstree/config.status
+masstree/configure
+out-perf.masstree/
